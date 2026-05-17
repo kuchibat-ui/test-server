@@ -1,0 +1,79 @@
+name: Deploy Spring Application
+
+on:
+  push:
+    branches: [ master ]
+
+env:
+  APP_NAME: myapp
+  DEPLOY_PATH: /srv
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Шаг 1: Получение кода
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Шаг 2: Установка JDK
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      # Шаг 3: Сборка приложения
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      # Шаг 4: Создание application.properties для production
+      - name: Create production config
+        run: |
+          cat > application-prod.properties << EOF
+          server.port=8080
+          spring.profiles.active=prod
+          # Добавьте другие настройки
+          EOF
+
+      # Шаг 5: Копирование файлов на сервер
+      - name: Copy files via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: "target/*.jar,application-prod.properties"
+          target: ${{ env.DEPLOY_PATH }}
+          strip_components: 1
+
+      # Шаг 6: Выполнение скрипта деплоя на сервере
+      - name: Simple deploy and restart
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            # Создаем директории
+            mkdir -p /srv/{releases,backups,logs}
+
+            # Копируем новый JAR
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            mkdir -p /srv/releases/${TIMESTAMP}
+            cp /tmp/deploy/*.jar /srv/releases/${TIMESTAMP}/
+            cp /tmp/deploy/application-prod.properties /srv/releases/${TIMESTAMP}/
+
+            # Обновляем симлинк
+            ln -sfn /srv/releases/${TIMESTAMP} /srv/current
+
+            # Перезапускаем сервис
+            sudo systemctl restart myapp
+
+            # Ждем и проверяем
+            sleep 10
+            sudo systemctl status myapp
